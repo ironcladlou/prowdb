@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
@@ -65,6 +64,9 @@ type Operator struct {
 
 	log    logr.Logger
 	client client.Client
+
+	lock sync.Mutex
+	prow map[string]ProwInfo
 }
 
 func NewStartCommand() *cobra.Command {
@@ -159,17 +161,40 @@ func (o Operator) reconcileConfigMap(request reconcile.Request) (reconcile.Resul
 
 	log.Info("observing configmap", "name", cm.Name, "spec", thanos.Spec)
 
+	log.Info("updating prow cache")
+	if o.prow == nil {
+		o.lock.Lock()
+		o.prow = map[string]ProwInfo{}
+		o.lock.Unlock()
+	}
 	var wg sync.WaitGroup
-	createErrors := []error{}
-	errorChannel := make(chan error)
-	defer close(errorChannel)
-	go func() {
-		for err := range errorChannel {
-			createErrors = append(createErrors, err)
-		}
-	}()
 	for i := range thanos.Spec.URLs {
 		url := thanos.Spec.URLs[i]
+		_, found := o.prow[url]
+		if !found {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				info, err := getProwInfo(url)
+				if err != nil {
+					log.Error(err, "couldn't get prow info", "url", url)
+				} else {
+					o.lock.Lock()
+					o.prow[url] = info
+					o.lock.Unlock()
+					log.Info("fetched prow info", "url", url, "info", info)
+				}
+			}()
+		}
+	}
+	wg.Wait()
+
+	for _, url := range thanos.Spec.URLs {
+		prowInfo, hasProwInfo := o.prow[url]
+		if !hasProwInfo {
+			log.Error(nil, "no prow info found", "url", url)
+			continue
+		}
 		prometheusDeploymentName := o.prometheusDeploymentName(url)
 		prometheusDeployment := &appsv1.Deployment{}
 		hasPrometheusDeployment := true
@@ -181,43 +206,25 @@ func (o Operator) reconcileConfigMap(request reconcile.Request) (reconcile.Resul
 				return reconcile.Result{}, fmt.Errorf("couldn't fetch deployment: %w", err)
 			}
 		}
-		if !hasPrometheusDeployment {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				log.Info("started fetching prow info", "url", url)
-				prowInfo, err := getProwInfo(url)
-				if err != nil {
-					errorChannel <- fmt.Errorf("couldn't get prow info for %s: %w", url, err)
-					return
-				}
-				log.Info("finished fetching prow info", "url", url)
-				prometheusDeployment = o.prometheusDeploymentManifest(url, prowInfo.MetricsURL, prowInfo.Started, prowInfo.Finished)
-				prometheusDeployment.Spec.Template.Labels[thanos.Name] = "true"
-				err = o.client.Create(context.TODO(), prometheusDeployment)
-				if err != nil {
-					errorChannel <- fmt.Errorf("couldn't create deployment for url %s: %w", url, err)
-					return
-				} else {
-					log.Info("created deployment", "name", prometheusDeployment.Name, "url", url, "started", prowInfo.Started, "finished", prowInfo.Finished)
-				}
-			}()
+		desiredPrometheusDeployment := o.prometheusDeploymentManifest(url, prowInfo.MetricsURL, prowInfo.Started, prowInfo.Finished)
+		if hasPrometheusDeployment {
+			prometheusDeployment.Spec = desiredPrometheusDeployment.Spec
+			prometheusDeployment.Spec.Template.Labels[thanos.Name] = "true"
+			err := o.client.Update(context.TODO(), prometheusDeployment)
+			if err != nil {
+				return reconcile.Result{}, fmt.Errorf("couldn't update deployment for url %s: %w", url, err)
+			} else {
+				log.Info("updated deployment", "name", prometheusDeployment.Name, "url", url)
+			}
 		} else {
-			_, hasReference := prometheusDeployment.Spec.Template.Labels[thanos.Name]
-			if !hasReference {
-				prometheusDeployment.Spec.Template.Labels[thanos.Name] = "true"
-				err := o.client.Update(context.TODO(), prometheusDeployment)
-				if err != nil {
-					return reconcile.Result{}, fmt.Errorf("couldn't update deployment for url %s: %w", url, err)
-				} else {
-					log.Info("updated deployment", "name", prometheusDeployment.Name, "url", url)
-				}
+			desiredPrometheusDeployment.Spec.Template.Labels[thanos.Name] = "true"
+			err := o.client.Create(context.TODO(), desiredPrometheusDeployment)
+			if err != nil {
+				return reconcile.Result{}, fmt.Errorf("couldn't create deployment for url %s: %w", url, err)
+			} else {
+				log.Info("updated deployment", "name", prometheusDeployment.Name, "url", url)
 			}
 		}
-	}
-	wg.Wait()
-	for _, err := range createErrors {
-		log.Error(err, "failed to create deployment")
 	}
 
 	storeService := &corev1.Service{}
@@ -365,12 +372,20 @@ func (o Operator) prometheusDeploymentManifest(url string, metricsURL string, st
 						{
 							Name:       "setup",
 							Image:      o.FetcherImage,
-							Command:    []string{"/bin/bash", "-c", deploymentInitScript(name.Name)},
+							Command:    []string{"/bin/bash", "-c", deploymentInitScript()},
 							WorkingDir: "/prometheus/",
 							Env: []corev1.EnvVar{
 								{
 									Name:  "PROMTAR",
 									Value: metricsURL,
+								},
+								{
+									Name:  "DEPLOYMENT_NAME",
+									Value: name.Name,
+								},
+								{
+									Name:  "PROW_URL",
+									Value: url,
 								},
 							},
 							VolumeMounts: []corev1.VolumeMount{
@@ -650,8 +665,8 @@ func (o Operator) thanosQueryRouteManifest(thanos Thanos) *routev1.Route {
 	}
 }
 
-func deploymentInitScript(name string) string {
-	return fmt.Sprintf(`set -uxo pipefail
+func deploymentInitScript() string {
+	return `set -uxo pipefail
 umask 0000
 curl -sL ${PROMTAR} | tar xvz -m
 chown -R 65534:65534 /prometheus
@@ -660,12 +675,13 @@ cat >/prometheus/prometheus.yml <<EOL
 # my global config
 global:
   external_labels:
-    cluster_name: %s
+    cluster_name: '${DEPLOYMENT_NAME}'
+    cluster_url: '${PROW_URL}'
 
 scrape_configs:
   - job_name: 'prometheus'
     static_configs:
     - targets: ['localhost:9090']
 EOL
-`, name)
+`
 }
