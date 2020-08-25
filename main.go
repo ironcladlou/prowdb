@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"os"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -26,11 +28,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
-	"k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	routev1 "github.com/openshift/api/route/v1"
 )
@@ -158,7 +159,17 @@ func (o Operator) reconcileConfigMap(request reconcile.Request) (reconcile.Resul
 
 	log.Info("observing configmap", "name", cm.Name, "spec", thanos.Spec)
 
-	for _, url := range thanos.Spec.URLs {
+	var wg sync.WaitGroup
+	createErrors := []error{}
+	errorChannel := make(chan error)
+	defer close(errorChannel)
+	go func() {
+		for err := range errorChannel {
+			createErrors = append(createErrors, err)
+		}
+	}()
+	for i := range thanos.Spec.URLs {
+		url := thanos.Spec.URLs[i]
 		prometheusDeploymentName := o.prometheusDeploymentName(url)
 		prometheusDeployment := &appsv1.Deployment{}
 		hasPrometheusDeployment := true
@@ -171,32 +182,42 @@ func (o Operator) reconcileConfigMap(request reconcile.Request) (reconcile.Resul
 			}
 		}
 		if !hasPrometheusDeployment {
-			log.Info("started fetching prow info", "url", url)
-			prowInfo, err := getProwInfo(url)
-			if err != nil {
-				return reconcile.Result{}, fmt.Errorf("couldn't get prow info for %s: %w", url, err)
-			}
-			log.Info("finished fetching prow info", "url", url)
-			prometheusDeployment = o.prometheusDeploymentManifest(url, prowInfo.MetricsURL, prowInfo.Started, prowInfo.Finished)
-			prometheusDeployment.Spec.Template.Labels[thanos.Name] = "true"
-			err = o.client.Create(context.TODO(), prometheusDeployment)
-			if err != nil {
-				return reconcile.Result{}, fmt.Errorf("couldn't create deployment: %w", err)
-			} else {
-				log.Info("created deployment", "name", prometheusDeployment.Name, "url", url, "started", prowInfo.Started, "finished", prowInfo.Finished)
-			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				log.Info("started fetching prow info", "url", url)
+				prowInfo, err := getProwInfo(url)
+				if err != nil {
+					errorChannel <- fmt.Errorf("couldn't get prow info for %s: %w", url, err)
+					return
+				}
+				log.Info("finished fetching prow info", "url", url)
+				prometheusDeployment = o.prometheusDeploymentManifest(url, prowInfo.MetricsURL, prowInfo.Started, prowInfo.Finished)
+				prometheusDeployment.Spec.Template.Labels[thanos.Name] = "true"
+				err = o.client.Create(context.TODO(), prometheusDeployment)
+				if err != nil {
+					errorChannel <- fmt.Errorf("couldn't create deployment for url %s: %w", url, err)
+					return
+				} else {
+					log.Info("created deployment", "name", prometheusDeployment.Name, "url", url, "started", prowInfo.Started, "finished", prowInfo.Finished)
+				}
+			}()
 		} else {
 			_, hasReference := prometheusDeployment.Spec.Template.Labels[thanos.Name]
 			if !hasReference {
 				prometheusDeployment.Spec.Template.Labels[thanos.Name] = "true"
 				err := o.client.Update(context.TODO(), prometheusDeployment)
 				if err != nil {
-					return reconcile.Result{}, fmt.Errorf("couldn't update deployment: %w", err)
+					return reconcile.Result{}, fmt.Errorf("couldn't update deployment for url %s: %w", url, err)
 				} else {
 					log.Info("updated deployment", "name", prometheusDeployment.Name, "url", url)
 				}
 			}
 		}
+	}
+	wg.Wait()
+	for _, err := range createErrors {
+		log.Error(err, "failed to create deployment")
 	}
 
 	storeService := &corev1.Service{}
