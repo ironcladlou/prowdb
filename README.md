@@ -10,6 +10,13 @@ oc create namespace thanos-operator
 go run . --namespace thanos-operator
 ```
 
+Or you can deploy it to an existing Kubernetes or OpenShift cluster.
+
+```
+oc create namespace thanos-operator
+oc apply --namespace thanos-operator -f manifests/
+```
+
 The operator reconciles configurations stored in ConfigMaps.
 
 Create some files like `thanos-a.yaml`:
