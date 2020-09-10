@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana
+data:
+  config.ini: |
+    [auth.anonymous]
+    enabled = true
+    org_name = Main Org.
+    org_role = Viewer
+
+    [security]
+    admin_user = admin
+    admin_password = "$__file{/etc/secrets/grafana/admin_password}"
+
+    [server]
+    protocol = https
+    cert_file = /etc/service-cert/tls.crt
+    cert_key = /etc/service-cert/tls.key

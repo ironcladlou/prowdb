@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: operator
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      name: operator
+  template:
+    metadata:
+      labels:
+        name: operator
+    spec:
+      serviceAccountName: operator
+      volumes:
+      - name: db
+        configMap:
+          name: db
+      containers:
+      - name: operator
+        image: quay.io/dmace/ez-thanos-operator:latest
+        imagePullPolicy: Always
+        resources:
+          requests:
+            cpu: 10m
+            memory: 20Mi
+        volumeMounts:
+        - name: db
+          mountPath: "/db"
+          readOnly: true
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        command:
+        - "ez-thanos-operator"
+        - "start"
+        - "--namespace=$(NAMESPACE)"
+        - "--db-file=/db/db.json"

@@ -1,53 +1,75 @@
 # OpenShift CI Thanos Operator
 
-Automatically manages Thanos query services aggregating slices of Prometheus instances hosting metrics
+Tools to help work with Prometheus metrics produced by OpenShift CI jobs.
+
+Automatically manages Thanos query frontends aggregating slices of Prometheus instances hosting metrics
 scraped from CI tarballs.
 
-Here's how to run it locally, assuming `KUBECONFIG` is set to a cluster to which you have admin permissions.
-
+Create a namespace for the operator:
 ```
-oc create namespace thanos-operator
-go run . --namespace thanos-operator
+oc create namespace ci-metrics
 ```
 
-Or you can deploy it to an existing Kubernetes or OpenShift cluster.
-
+Create a job database by scraping Prow/GCS (this requires the `gcloud` command):
 ```
-oc create namespace thanos-operator
-oc apply --namespace thanos-operator -f manifests/
-```
-
-The operator reconciles configurations stored in ConfigMaps.
-
-Create some files like `thanos-a.yaml`:
-
-```yaml
-urls:
-- https://prow.ci.openshift.org/view/gcs/origin-ci-test/logs/release-openshift-ocp-installer-e2e-aws-4.6/1295601070994624512
-- https://prow.ci.openshift.org/view/gcs/origin-ci-test/logs/release-openshift-ocp-installer-e2e-aws-4.6/1295765814342848512
-- https://prow.ci.openshift.org/view/gcs/origin-ci-test/logs/release-openshift-ocp-installer-e2e-aws-4.6/1296637077563117568
-- https://prow.ci.openshift.org/view/gcs/origin-ci-test/logs/release-openshift-ocp-installer-e2e-aws-4.6/1297837010672685056
-- https://prow.ci.openshift.org/view/gcs/origin-ci-test/logs/release-openshift-ocp-installer-e2e-aws-4.6/1297853566941138944
+# Collect a week's worth of important periodics jobs.
+go run . db create \
+--from 168h \
+--job release-openshift-ocp-installer-e2e-aws-4.6 \
+--job release-openshift-ocp-installer-e2e-gcp-4.6 \
+--job release-openshift-ocp-installer-e2e-azure-4.6 \
+--job release-openshift-origin-installer-e2e-gcp-upgrade-4.6 \
+--job release-openshift-origin-installer-e2e-azure-upgrade-4.6 \
+--job release-openshift-origin-installer-e2e-aws-upgrade-4.5-stable-to-4.6-ci \
+--output-file prow-1w.json
 ```
 
-and `thanos-b.yaml`:
-
-```yaml
-urls:
-- https://prow.ci.openshift.org/view/gcs/origin-ci-test/logs/release-openshift-ocp-installer-e2e-aws-4.6/1297837010672685056
-- https://prow.ci.openshift.org/view/gcs/origin-ci-test/logs/release-openshift-ocp-installer-e2e-aws-4.6/1297853566941138944
+Install the job database into the operator's namespace:
+```
+oc create configmap --namespace ci-metrics db --from-file=db.json=prow-1w.json
 ```
 
-Create the ConfigMaps:
-
+Install the operator:
 ```
-oc create configmap --namespace thanos-operator thanos-a --from-file=thanos.yaml=thanos-a.yaml
-oc create configmap --namespace thanos-operator thanos-b --from-file=thanos.yaml=thanos-b.yaml
+oc apply --namespace ci-metrics manifests/operator
 ```
 
-The operator should set up a Prometheus instance per URL, and a Thanos query instance per ConfigMap. Check the
-routes to find the Thanos URLs:
+Create a `MetricsCluster` resource (stuffed in a configmap, for now) that specifies
+the Prow URLs (from the database) to aggregate into a discrete Thanos cluster:
+```
+# Create an aggregation of the three major e2e periodics from the
+# last week, capped at one result per day per job. 
+go run . db select \
+--from=168h --result=SUCCESS --max-per-day=1 \
+--db-file prow-1w.json \
+--job release-openshift-ocp-installer-e2e-aws-4.6 \
+--job release-openshift-ocp-installer-e2e-gcp-4.6 \
+--job release-openshift-ocp-installer-e2e-azure-4.6 \
+--output cluster=e2e-46-1w | oc apply --namespace thanos -f -
+```
+
+Or you could create this manually:
+```
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: e2e-46-1w
+data: |
+  cluster.yaml:
+    apiVersion: ez-thanos-operator/v1
+    kind: MetricsCluster
+    spec:
+      urls:
+      - https://prow.ci.openshift.org/view/gs/origin-ci-test/logs/release-openshift-ocp-installer-e2e-aws-4.6/1302064249488543744
+      - https://prow.ci.openshift.org/view/gs/origin-ci-test/logs/release-openshift-ocp-installer-e2e-aws-4.6/1301691653089660928
+      - https://prow.ci.openshift.org/view/gs/origin-ci-test/logs/release-openshift-ocp-installer-e2e-aws-4.6/1301322578622681088
+```
+
+The operator manages a Prometheus instance per distinct URL, and a Thanos query
+instance per ConfigMap. Check the routes to find the Thanos URLs:
 
 ```
 oc get --namespace thanos-operator routes
 ```
+
+These route URLs can be wired into Grafana as a Prometheus data source.
