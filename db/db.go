@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ironcladlou/ez-thanos-operator/prow"
+	"github.com/ironcladlou/dowser/prow"
 )
 
 type Build struct {

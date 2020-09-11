@@ -15,7 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ironcladlou/ez-thanos-operator/prow"
+	"github.com/ironcladlou/dowser/prow"
 )
 
 var storagePattern = regexp.MustCompile(`.*/(origin-ci-test/.*)`)

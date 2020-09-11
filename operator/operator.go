@@ -35,8 +35,8 @@ import (
 
 	routev1 "github.com/openshift/api/route/v1"
 
-	"github.com/ironcladlou/ez-thanos-operator/api"
-	"github.com/ironcladlou/ez-thanos-operator/db"
+	"github.com/ironcladlou/dowser/api"
+	"github.com/ironcladlou/dowser/db"
 )
 
 func init() {
@@ -96,7 +96,7 @@ func NewStartCommand() *cobra.Command {
 	command.Flags().StringVarP(&operator.FetcherImage, "fetcher-image", "", "quay.io/fedora/fedora:31-x86_64", "")
 	command.Flags().StringVarP(&operator.PrometheusImage, "prometheus-image", "", "quay.io/prometheus/prometheus:v2.17.2", "")
 	command.Flags().StringVarP(&operator.ThanosImage, "thanos-image", "", "quay.io/thanos/thanos:v0.14.0", "")
-	command.Flags().StringVarP(&operator.Namespace, "namespace", "", "ez-thanos-operator", "")
+	command.Flags().StringVarP(&operator.Namespace, "namespace", "", "dowser", "")
 	command.Flags().StringVarP(&operator.PrometheusMemory, "prometheus-memory", "", "350Mi", "")
 	command.Flags().StringVarP(&dbFile, "db-file", "f", path.Join(os.Getenv("HOME"), ".prow-build-cache.json"), "build database file")
 

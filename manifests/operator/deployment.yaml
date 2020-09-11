@@ -21,7 +21,7 @@ spec:
           name: db
       containers:
       - name: operator
-        image: quay.io/dmace/ez-thanos-operator:latest
+        image: quay.io/dmace/dowser:latest
         imagePullPolicy: Always
         resources:
           requests:
@@ -37,7 +37,7 @@ spec:
             fieldRef:
               fieldPath: metadata.namespace
         command:
-        - "ez-thanos-operator"
+        - "dowser"
         - "start"
         - "--namespace=$(NAMESPACE)"
         - "--db-file=/db/db.json"

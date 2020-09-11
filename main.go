@@ -4,12 +4,12 @@ import (
 	"github.com/spf13/cobra"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 
-	"github.com/ironcladlou/ez-thanos-operator/db"
-	"github.com/ironcladlou/ez-thanos-operator/operator"
+	"github.com/ironcladlou/dowser/db"
+	"github.com/ironcladlou/dowser/operator"
 )
 
 func main() {
-	var cmd = &cobra.Command{Use: "ez-thanos-operator"}
+	var cmd = &cobra.Command{Use: "dowser"}
 	cmd.AddCommand(operator.NewStartCommand())
 	cmd.AddCommand(db.NewDBCommand())
 

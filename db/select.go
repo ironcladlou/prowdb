@@ -18,7 +18,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/ironcladlou/ez-thanos-operator/api"
+	"github.com/ironcladlou/dowser/api"
 )
 
 var (
@@ -138,7 +138,7 @@ func selectBuilds(options selectOptions, builds []Build) error {
 		cluster := &api.MetricsCluster{
 			TypeMeta: metav1.TypeMeta{
 				Kind:       "MetricsCluster",
-				APIVersion: "ez-thanos-operator/v1",
+				APIVersion: "dowser/v1",
 			},
 			ObjectMeta: metav1.ObjectMeta{
 				Name: name,

@@ -1,4 +1,4 @@
-# OpenShift CI Thanos Operator
+# Dowser
 
 Tools to help work with Prometheus metrics produced by OpenShift CI jobs.
 
@@ -7,7 +7,7 @@ scraped from CI tarballs.
 
 Create a namespace for the operator:
 ```
-oc create namespace ci-metrics
+oc create namespace dowser
 ```
 
 Create a job database by scraping Prow/GCS (this requires the `gcloud` command):
@@ -26,12 +26,12 @@ go run . db create \
 
 Install the job database into the operator's namespace:
 ```
-oc create configmap --namespace ci-metrics db --from-file=db.json=prow-1w.json
+oc create configmap --namespace dowser db --from-file=db.json=prow-1w.json
 ```
 
 Install the operator:
 ```
-oc apply --namespace ci-metrics manifests/operator
+oc apply --namespace dowser manifests/operator
 ```
 
 Create a `MetricsCluster` resource (stuffed in a configmap, for now) that specifies
@@ -45,7 +45,7 @@ go run . db select \
 --job release-openshift-ocp-installer-e2e-aws-4.6 \
 --job release-openshift-ocp-installer-e2e-gcp-4.6 \
 --job release-openshift-ocp-installer-e2e-azure-4.6 \
---output cluster=e2e-46-1w | oc apply --namespace thanos -f -
+--output cluster=e2e-46-1w | oc apply --namespace dowser -f -
 ```
 
 Or you could create this manually:
@@ -56,7 +56,7 @@ metadata:
   name: e2e-46-1w
 data: |
   cluster.yaml:
-    apiVersion: ez-thanos-operator/v1
+    apiVersion: dowser/v1
     kind: MetricsCluster
     spec:
       urls:
@@ -69,7 +69,7 @@ The operator manages a Prometheus instance per distinct URL, and a Thanos query
 instance per ConfigMap. Check the routes to find the Thanos URLs:
 
 ```
-oc get --namespace thanos-operator routes
+oc get --namespace dowser routes
 ```
 
 These route URLs can be wired into Grafana as a Prometheus data source.

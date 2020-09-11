@@ -1,4 +1,4 @@
-module github.com/ironcladlou/ez-thanos-operator
+module github.com/ironcladlou/dowser
 
 go 1.14
 
