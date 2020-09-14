@@ -41,7 +41,7 @@ func GetJobHistory(from time.Duration, jobURL string) ([]Build, error) {
 			if build.Started.Before(cutoff) {
 				return builds, nil
 			}
-			builds = append(builds, Build{build})
+			builds = append(builds, Build{buildData: build})
 		}
 		olderURL, err := url.Parse(hist.OlderLink)
 		if err != nil {

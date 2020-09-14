@@ -3,9 +3,13 @@ package operator
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
-	"os"
-	"path"
+	"net/http"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
@@ -35,15 +39,14 @@ import (
 
 	routev1 "github.com/openshift/api/route/v1"
 
+	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
+
 	"github.com/ironcladlou/dowser/api"
-	"github.com/ironcladlou/dowser/db"
 )
 
 func init() {
 	logging.SetLogger(zap.New())
 }
-
-type BuildDatabase []db.Build
 
 type Operator struct {
 	Namespace string
@@ -52,17 +55,23 @@ type Operator struct {
 	PrometheusImage string
 	ThanosImage     string
 
+	GCSStorageBaseURL string
+	ProwBaseURL       string
+	GCSPrefix         string
+
 	PrometheusMemory string
 
 	log    logr.Logger
 	client client.Client
-	db     BuildDatabase
+}
+
+type Job struct {
+	prowapi.ProwJob
+	PrometheusTarURL string
 }
 
 func NewStartCommand() *cobra.Command {
 	operator := &Operator{}
-
-	var dbFile string
 
 	var command = &cobra.Command{
 		Use:   "start",
@@ -82,11 +91,6 @@ func NewStartCommand() *cobra.Command {
 			operator.log = logging.Log.WithName("operator")
 			operator.client = mgr.GetClient()
 
-			database, err := db.LoadBuilds(dbFile)
-			if err != nil {
-				panic(err)
-			}
-			operator.db = database
 			if err := operator.Start(mgr); err != nil {
 				panic(err)
 			}
@@ -97,8 +101,10 @@ func NewStartCommand() *cobra.Command {
 	command.Flags().StringVarP(&operator.PrometheusImage, "prometheus-image", "", "quay.io/prometheus/prometheus:v2.17.2", "")
 	command.Flags().StringVarP(&operator.ThanosImage, "thanos-image", "", "quay.io/thanos/thanos:v0.14.0", "")
 	command.Flags().StringVarP(&operator.Namespace, "namespace", "", "dowser", "")
+	command.Flags().StringVarP(&operator.GCSStorageBaseURL, "gcs-storage-base-url", "", "https://storage.googleapis.com/origin-ci-test", "")
+	command.Flags().StringVarP(&operator.ProwBaseURL, "prow-base-url", "", "https://prow.ci.openshift.org/view/gs/origin-ci-test", "")
+	command.Flags().StringVarP(&operator.GCSPrefix, "gcs-prefix", "", "https://gcsweb-ci.apps.ci.l2s4.p1.openshiftapps.com", "")
 	command.Flags().StringVarP(&operator.PrometheusMemory, "prometheus-memory", "", "350Mi", "")
-	command.Flags().StringVarP(&dbFile, "db-file", "f", path.Join(os.Getenv("HOME"), ".prow-build-cache.json"), "build database file")
 
 	return command
 }
@@ -234,27 +240,32 @@ func (o *Operator) reconcileConfigMap(request reconcile.Request) (reconcile.Resu
 	}
 
 	for _, url := range cluster.Spec.URLs {
-		var build db.Build
-		found := false
-		for _, candidate := range o.db {
-			if candidate.URL == url {
-				build = candidate
-				found = true
-				break
-			}
-		}
-		if !found {
-			log.Error(nil, "unknown build", "url", url)
+		prowInfoURL := strings.ReplaceAll(url, o.ProwBaseURL, o.GCSStorageBaseURL) + "/prowjob.json"
+
+		var prowJob prowapi.ProwJob
+		resp, err := http.Get(prowInfoURL)
+		if err != nil {
+			log.Error(err, "couldn't get prow info", "url", url, "prowInfoURL", prowInfoURL)
 			continue
 		}
-		if len(build.PrometheusTarURL) == 0 {
-			log.Error(nil, "no prometheus tar URL defined for build", "url", url)
+		err = json.NewDecoder(resp.Body).Decode(&prowJob)
+		if err != nil {
+			log.Error(err, "couldn't decode prow info", "url", url)
+		}
+		prometheusTarURL, err := findPrometheusTarURL(url, o.GCSPrefix)
+		if err != nil {
+			log.Error(err, "no prometheus tar URL defined for build", "url", url)
 			continue
 		}
-		prometheusDeploymentName := o.prometheusDeploymentName(build)
+
+		job := &Job{
+			ProwJob:          prowJob,
+			PrometheusTarURL: prometheusTarURL,
+		}
+		prometheusDeploymentName := o.prometheusDeploymentName(job)
 		prometheusDeployment := &appsv1.Deployment{}
 		hasPrometheusDeployment := true
-		err := o.client.Get(context.TODO(), prometheusDeploymentName, prometheusDeployment)
+		err = o.client.Get(context.TODO(), prometheusDeploymentName, prometheusDeployment)
 		if err != nil {
 			if errors.IsNotFound(err) {
 				hasPrometheusDeployment = false
@@ -262,7 +273,7 @@ func (o *Operator) reconcileConfigMap(request reconcile.Request) (reconcile.Resu
 				return reconcile.Result{}, fmt.Errorf("couldn't fetch deployment: %w", err)
 			}
 		}
-		desiredPrometheusDeployment := o.prometheusDeploymentManifest(build)
+		desiredPrometheusDeployment := o.prometheusDeploymentManifest(job)
 		if hasPrometheusDeployment {
 			prometheusDeployment.Spec = desiredPrometheusDeployment.Spec
 			prometheusDeployment.Spec.Template.Labels[cluster.Name] = "true"
@@ -374,14 +385,14 @@ func (o *Operator) reconcileConfigMap(request reconcile.Request) (reconcile.Resu
 	return reconcile.Result{}, nil
 }
 
-func (o *Operator) prometheusDeploymentName(build db.Build) types.NamespacedName {
-	hash := sha256.Sum256([]byte(build.URL))
+func (o *Operator) prometheusDeploymentName(job *Job) types.NamespacedName {
+	hash := sha256.Sum256([]byte(job.Status.URL))
 	name := fmt.Sprintf("prometheus-%x", hash[:6])
 	return types.NamespacedName{Namespace: o.Namespace, Name: name}
 }
 
-func (o *Operator) prometheusDeploymentManifest(build db.Build) *appsv1.Deployment {
-	name := o.prometheusDeploymentName(build)
+func (o *Operator) prometheusDeploymentManifest(job *Job) *appsv1.Deployment {
+	name := o.prometheusDeploymentName(job)
 	sharePIDNamespace := true
 	var replicas int32 = 1
 
@@ -393,10 +404,9 @@ func (o *Operator) prometheusDeploymentManifest(build db.Build) *appsv1.Deployme
 				"app": "prometheus",
 			},
 			Annotations: map[string]string{
-				"url":      build.URL,
-				"started":  build.Started.String(),
-				"duration": build.Duration.String(),
-				"finished": build.Started.Add(build.Duration).String(),
+				"url":       job.Status.URL,
+				"started":   job.Status.StartTime.UTC().Format(time.RFC3339),
+				"completed": job.Status.CompletionTime.UTC().Format(time.RFC3339),
 			},
 		},
 		Spec: appsv1.DeploymentSpec{
@@ -414,10 +424,9 @@ func (o *Operator) prometheusDeploymentManifest(build db.Build) *appsv1.Deployme
 						"prometheus": name.Name,
 					},
 					Annotations: map[string]string{
-						"url":      build.URL,
-						"started":  build.Started.String(),
-						"duration": build.Duration.String(),
-						"finished": build.Started.Add(build.Duration).String(),
+						"url":       job.Status.URL,
+						"started":   job.Status.StartTime.UTC().Format(time.RFC3339),
+						"completed": job.Status.CompletionTime.UTC().Format(time.RFC3339),
 					},
 				},
 				Spec: corev1.PodSpec{
@@ -439,7 +448,7 @@ func (o *Operator) prometheusDeploymentManifest(build db.Build) *appsv1.Deployme
 							Env: []corev1.EnvVar{
 								{
 									Name:  "PROMTAR",
-									Value: build.PrometheusTarURL,
+									Value: job.PrometheusTarURL,
 								},
 								{
 									Name:  "DEPLOYMENT_NAME",
@@ -447,11 +456,11 @@ func (o *Operator) prometheusDeploymentManifest(build db.Build) *appsv1.Deployme
 								},
 								{
 									Name:  "PROW_URL",
-									Value: build.URL,
+									Value: job.Status.URL,
 								},
 								{
 									Name:  "PROW_JOB",
-									Value: build.Job,
+									Value: job.Spec.Job,
 								},
 							},
 							VolumeMounts: []corev1.VolumeMount{
@@ -751,4 +760,25 @@ scrape_configs:
     - targets: ['localhost:9090']
 EOL
 `
+}
+
+var storagePattern = regexp.MustCompile(`.*/(origin-ci-test/.*)`)
+var prometheusURLs map[string]string
+var prometheusLock sync.Mutex
+
+func findPrometheusTarURL(jobURL string, gcsPrefix string) (string, error) {
+	prometheusLock.Lock()
+	defer prometheusLock.Unlock()
+	if prometheusURLs == nil {
+		prometheusURLs = map[string]string{}
+	}
+	if prometheusURL, found := prometheusURLs[jobURL]; found {
+		return prometheusURL, nil
+	}
+	tarURL, err := getTarURLFromProw(jobURL, gcsPrefix)
+	if err != nil {
+		return "", err
+	}
+	prometheusURLs[jobURL] = tarURL
+	return tarURL, nil
 }
