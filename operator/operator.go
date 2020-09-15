@@ -17,8 +17,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"sigs.k8s.io/yaml"
-
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,7 +39,7 @@ import (
 
 	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
 
-	"github.com/ironcladlou/dowser/api"
+	api "github.com/ironcladlou/dowser/api/v1"
 )
 
 func init() {
@@ -55,6 +53,10 @@ type Operator struct {
 	PrometheusImage string
 	ThanosImage     string
 
+	// Stuff for grepping prometheus.tar; can be replaced with gcloud
+	// CLI at some point but incorporating that into an image is a bit
+	// more work for now. Or a new recursive client search (which I think
+	// is what the gcloud CLI does.)
 	GCSStorageBaseURL string
 	ProwBaseURL       string
 	GCSPrefix         string
@@ -88,6 +90,10 @@ func NewStartCommand() *cobra.Command {
 			if err != nil {
 				panic(err)
 			}
+			err = api.AddToScheme(mgr.GetScheme())
+			if err != nil {
+				panic(err)
+			}
 			operator.log = logging.Log.WithName("operator")
 			operator.client = mgr.GetClient()
 
@@ -112,16 +118,16 @@ func NewStartCommand() *cobra.Command {
 func (o *Operator) Start(mgr manager.Manager) error {
 	log := o.log.WithName("entrypoint")
 
-	configMapController, err := controller.New("configmap-controller", mgr, controller.Options{
+	clusterController, err := controller.New("metricscluster-controller", mgr, controller.Options{
 		Reconciler: reconcile.Func(func(request reconcile.Request) (reconcile.Result, error) {
-			return o.reconcileConfigMap(request)
+			return o.reconcileMetricsCluster(request)
 		}),
 	})
 	if err != nil {
-		return fmt.Errorf("unable to set up configmap controller: %w", err)
+		return fmt.Errorf("unable to set up metricscluster controller: %w", err)
 	}
-	if err := configMapController.Watch(&source.Kind{Type: &corev1.ConfigMap{}}, &handler.EnqueueRequestForObject{}); err != nil {
-		return fmt.Errorf("unable to watch configmaps: %w", err)
+	if err := clusterController.Watch(&source.Kind{Type: &api.MetricsCluster{}}, &handler.EnqueueRequestForObject{}); err != nil {
+		return fmt.Errorf("unable to watch metricsclusters: %w", err)
 	}
 
 	deploymentController, err := controller.New("deployment-controller", mgr, controller.Options{
@@ -165,14 +171,14 @@ func (o *Operator) reconcilePrometheusDeployment(deployment *appsv1.Deployment) 
 	log := o.log.WithValues("controller", "prometheus-deployment-controller", "deployment", deployment.Name)
 	log.Info("reconciling prometheus deployment")
 
-	configMaps := &corev1.ConfigMapList{}
-	err := o.client.List(context.TODO(), configMaps, &client.ListOptions{Namespace: o.Namespace})
+	clusters := &api.MetricsClusterList{}
+	err := o.client.List(context.TODO(), clusters, &client.ListOptions{Namespace: o.Namespace})
 	if err != nil {
-		return reconcile.Result{}, fmt.Errorf("couldn't fetch configmaps: %w", err)
+		return reconcile.Result{}, fmt.Errorf("couldn't fetch metricsclusters: %w", err)
 	}
 	isReferenced := false
-	for _, cm := range configMaps.Items {
-		if _, hasReference := deployment.Spec.Template.Labels[cm.Name]; hasReference {
+	for _, cluster := range clusters.Items {
+		if _, hasReference := deployment.Spec.Template.Labels[cluster.Name]; hasReference {
 			isReferenced = true
 			break
 		}
@@ -192,23 +198,22 @@ func (o *Operator) reconcilePrometheusDeployment(deployment *appsv1.Deployment) 
 	return reconcile.Result{}, nil
 }
 
-func (o *Operator) reconcileConfigMap(request reconcile.Request) (reconcile.Result, error) {
-	log := o.log.WithValues("controller", "configmap-controller", "request", request)
-	log.Info("reconciling configmap")
+func (o *Operator) reconcileMetricsCluster(request reconcile.Request) (reconcile.Result, error) {
+	log := o.log.WithValues("controller", "metricscluster-controller", "request", request)
 
-	cm := &corev1.ConfigMap{}
-	err := o.client.Get(context.TODO(), request.NamespacedName, cm)
+	cluster := &api.MetricsCluster{}
+	err := o.client.Get(context.TODO(), request.NamespacedName, cluster)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			log.Error(err, "couldn't find configmap")
+			log.Error(err, "couldn't find metricscluster")
 			deploymentList := appsv1.DeploymentList{}
 			err := o.client.List(context.TODO(), &deploymentList, &client.ListOptions{Namespace: o.Namespace})
 			if err != nil {
 				return reconcile.Result{}, fmt.Errorf("couldn't list deployments: %w", err)
 			}
 			for _, deployment := range deploymentList.Items {
-				if _, hasReference := deployment.Spec.Template.Labels[cm.Name]; hasReference {
-					delete(deployment.Spec.Template.Labels, cm.Name)
+				if _, hasReference := deployment.Spec.Template.Labels[cluster.Name]; hasReference {
+					delete(deployment.Spec.Template.Labels, cluster.Name)
 					err := o.client.Update(context.TODO(), &deployment)
 					if err != nil {
 						log.Error(err, "couldn't update deployment to remove reference", "deployment", deployment.Name)
@@ -219,24 +224,7 @@ func (o *Operator) reconcileConfigMap(request reconcile.Request) (reconcile.Resu
 			}
 			return reconcile.Result{}, nil
 		}
-		return reconcile.Result{}, fmt.Errorf("couldn't fetch configmap: %w", err)
-	}
-
-	data, hasData := cm.Data["cluster.yaml"]
-	if !hasData {
-		log.Error(nil, "configmap is missing cluster.yaml key")
-		return reconcile.Result{}, nil
-	}
-
-	cluster := &api.MetricsCluster{
-		ObjectMeta: metav1.ObjectMeta{},
-	}
-	cluster.Namespace = cm.Namespace
-	cluster.Name = cm.Name
-	err = yaml.Unmarshal([]byte(data), &cluster)
-	if err != nil {
-		log.Error(err, "configmap has invalid cluster.yaml contents")
-		return reconcile.Result{}, nil
+		return reconcile.Result{}, fmt.Errorf("couldn't fetch metricscluster: %w", err)
 	}
 
 	for _, url := range cluster.Spec.URLs {

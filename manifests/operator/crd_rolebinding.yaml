@@ -1,0 +1,12 @@
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: dowser-rolebinding
+subjects:
+- kind: ServiceAccount
+  name: operator
+  namespace: dowser
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dowser-role

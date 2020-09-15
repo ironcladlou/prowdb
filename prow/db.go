@@ -95,7 +95,11 @@ func create(options createOptions) error {
 	if err != nil {
 		return err
 	}
-	stmt, err := tx.Prepare("insert into jobs(id, name, result, url, started, duration) values(?, ?, ?, ?, ?, ?)")
+	stmt, err := tx.Prepare(`
+insert into jobs(id, name, result, url, started, duration)
+values(?, ?, ?, ?, ?, ?)
+on conflict(id) do update set name=excluded.name, result=excluded.result, url=excluded.url, started=excluded.started, duration=excluded.duration;
+`)
 	if err != nil {
 		return err
 	}
