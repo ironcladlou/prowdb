@@ -14,18 +14,28 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package gcs provides utilities for interacting with GCS.
+//
+// This includes basic CRUD operations. It is primarily focused on
+// reading prow build results uploaded to GCS.
 package gcs
 
 import (
+	"compress/zlib"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"io/ioutil"
 	"log"
 	"net/url"
 	"strings"
 
+	statepb "github.com/GoogleCloudPlatform/testgrid/pb/state"
+
 	"cloud.google.com/go/storage"
+	"github.com/golang/protobuf/proto"
 	"google.golang.org/api/option"
 )
 
@@ -47,6 +57,7 @@ type Path struct {
 	url url.URL
 }
 
+// NewPath returns a new Path if it parses.
 func NewPath(path string) (*Path, error) {
 	var p Path
 	err := p.Set(path)
@@ -59,6 +70,11 @@ func NewPath(path string) (*Path, error) {
 // String returns the gs://bucket/obj url
 func (g Path) String() string {
 	return g.url.String()
+}
+
+// URL returns the url
+func (g Path) URL() url.URL {
+	return g.url
 }
 
 // Set updates value from a gs://bucket/obj string, validating errors.
@@ -75,8 +91,8 @@ func (g *Path) SetURL(u *url.URL) error {
 	switch {
 	case u == nil:
 		return errors.New("nil url")
-	case u.Scheme != "gs":
-		return fmt.Errorf("must use a gs:// url: %s", u)
+	case u.Scheme != "gs" && u.Scheme != "" && u.Scheme != "file":
+		return fmt.Errorf("must use a gs://, file://, or local filesystem url: %s", u)
 	case strings.Contains(u.Host, ":"):
 		return fmt.Errorf("gs://bucket may not contain a port: %s", u)
 	case u.Opaque != "":
@@ -90,6 +106,24 @@ func (g *Path) SetURL(u *url.URL) error {
 	}
 	g.url = *u
 	return nil
+}
+
+// MarshalJSON encodes Path as a string
+func (g Path) MarshalJSON() ([]byte, error) {
+	return json.Marshal(g.String())
+}
+
+// MarshalJSON decodes a string into Path
+func (g *Path) UnmarshalJSON(buf []byte) error {
+	var str string
+	err := json.Unmarshal(buf, &str)
+	if err != nil {
+		return err
+	}
+	if g == nil {
+		g = &Path{}
+	}
+	return g.Set(str)
 }
 
 // ResolveReference returns the path relative to the current path
@@ -119,16 +153,22 @@ func calcCRC(buf []byte) uint32 {
 }
 
 const (
-	// Default ACLs for this upload
-	DefaultAcl = false
+	// DefaultACL for this upload
+	DefaultACL = false
 	// PublicRead ACL for this upload.
 	PublicRead = true
 )
 
-// Upload writes bytes to the specified Path
+// Upload writes bytes to the specified Path by converting the client and path into an ObjectHandle.
 func Upload(ctx context.Context, client *storage.Client, path Path, buf []byte, worldReadable bool, cacheControl string) error {
+	return realGCSClient{client: client}.Upload(ctx, path, buf, worldReadable, cacheControl)
+}
+
+// UploadHandle writes bytes to the specified ObjectHandle
+func UploadHandle(ctx context.Context, handle *storage.ObjectHandle, buf []byte, worldReadable bool, cacheControl string) error {
 	crc := calcCRC(buf)
-	w := client.Bucket(path.Bucket()).Object(path.Object()).NewWriter(ctx)
+	w := handle.NewWriter(ctx)
+	defer w.Close()
 	if worldReadable {
 		w.ACL = []storage.ACLRule{{Entity: storage.AllUsers, Role: storage.RoleReader}}
 	}
@@ -141,15 +181,38 @@ func Upload(ctx context.Context, client *storage.Client, path Path, buf []byte, 
 	// https://godoc.org/cloud.google.com/go/storage#Writer.Write
 	w.ObjectAttrs.CRC32C = crc
 	w.ProgressFunc = func(bytes int64) {
-		log.Printf("Uploading %s: %d/%d...", path, bytes, len(buf))
+		log.Printf("Uploading gs://%s/%s: %d/%d...", handle.BucketName(), handle.ObjectName(), bytes, len(buf))
 	}
 	if n, err := w.Write(buf); err != nil {
-		return fmt.Errorf("writing %s failed: %v", path, err)
+		return fmt.Errorf("write: %w", err)
 	} else if n != len(buf) {
-		return fmt.Errorf("partial write of %s: %d < %d", path, n, len(buf))
+		return fmt.Errorf("partial write: %d < %d", n, len(buf))
 	}
 	if err := w.Close(); err != nil {
-		return fmt.Errorf("closing %s failed: %v", path, err)
+		return fmt.Errorf("close: %w", err)
 	}
 	return nil
+}
+
+// DownloadGrid downloads and decompresses a grid from the specified path.
+func DownloadGrid(ctx context.Context, opener Opener, path Path) (*statepb.Grid, error) {
+	var g statepb.Grid
+	r, err := opener.Open(ctx, path)
+	if err != nil && err == storage.ErrObjectNotExist {
+		return &g, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open: %w", err)
+	}
+	defer r.Close()
+	zr, err := zlib.NewReader(r)
+	if err != nil {
+		return nil, fmt.Errorf("open zlib: %w", err)
+	}
+	pbuf, err := ioutil.ReadAll(zr)
+	if err != nil {
+		return nil, fmt.Errorf("decompress: %w", err)
+	}
+	err = proto.Unmarshal(pbuf, &g)
+	return &g, err
 }

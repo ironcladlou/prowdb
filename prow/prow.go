@@ -6,8 +6,20 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/spf13/cobra"
 	prowio "k8s.io/test-infra/prow/io"
 )
+
+func NewCommand() *cobra.Command {
+	var command = &cobra.Command{
+		Use:   "prow",
+		Short: "Prow functions.",
+	}
+
+	command.AddCommand(newDBCommand())
+
+	return command
+}
 
 type Build struct {
 	buildData
@@ -33,7 +45,7 @@ func GetJobHistory(from time.Duration, jobURL string) ([]Build, error) {
 	for {
 		fetchStarted := time.Now()
 		hist, err := getJobHistory(ctx, nextURL, opener)
-		log.Printf("fetched job history from %s (%vs)", nextURL, time.Since(fetchStarted)/time.Second)
+		log.Printf("fetched job history from %s in %v", nextURL, time.Since(fetchStarted)/time.Second)
 		if err != nil {
 			return builds, err
 		}

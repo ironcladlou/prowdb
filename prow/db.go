@@ -2,11 +2,14 @@ package prow
 
 import (
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"log"
 	"net/url"
 	"os"
 	"path"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -14,10 +17,10 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func NewDBCommand() *cobra.Command {
+func newDBCommand() *cobra.Command {
 	var command = &cobra.Command{
 		Use:   "db",
-		Short: "Prow build database functions.",
+		Short: "Prow database functions.",
 	}
 
 	command.AddCommand(newCreateCommand())
@@ -33,6 +36,7 @@ type createOptions struct {
 	From           time.Duration
 	Jobs           []string
 	OutputFile     string
+	DryRun         bool
 }
 
 func newCreateCommand() *cobra.Command {
@@ -40,7 +44,7 @@ func newCreateCommand() *cobra.Command {
 
 	var command = &cobra.Command{
 		Use:   "create",
-		Short: "Creates a sqlite database of CI build history.",
+		Short: "Creates or updates a sqlite database with CI build history.",
 		Run: func(cmd *cobra.Command, args []string) {
 			err := create(options)
 			if err != nil {
@@ -54,6 +58,7 @@ func newCreateCommand() *cobra.Command {
 	command.Flags().DurationVarP(&options.From, "from", "", 24*time.Hour, "how far back to find builds")
 	command.Flags().StringArrayVarP(&options.Jobs, "job", "", []string{"release-openshift-ocp-installer-e2e-aws-4.6"}, "jobs to find")
 	command.Flags().StringVarP(&options.OutputFile, "output-file", "f", path.Join(os.Getenv("HOME"), ".dowser.db"), "output database file location")
+	command.Flags().BoolVarP(&options.DryRun, "dry-run", "", false, "output data and exit without writing")
 
 	return command
 }
@@ -78,6 +83,16 @@ func create(options createOptions) error {
 		}(job)
 	}
 
+	if options.DryRun {
+		fmt.Println("waiting")
+		for range options.Jobs {
+			for _, build := range <-buildC {
+				fmt.Printf("%#v\n", build)
+			}
+		}
+		return nil
+	}
+
 	db, err := sql.Open("sqlite3", options.OutputFile)
 	if err != nil {
 		return err
@@ -85,7 +100,16 @@ func create(options createOptions) error {
 	defer db.Close()
 
 	sqlStmt := `
-	create table if not exists jobs (id text not null primary key, name text, result text, url text, started text, duration numeric);
+create table if not exists jobs (
+  id text not null primary key,
+	name text,
+	result text,
+	url text,
+	started text,
+	duration numeric,
+	prowname text,
+	prowjob text
+);
 	`
 	_, err = db.Exec(sqlStmt)
 	if err != nil {
@@ -96,9 +120,8 @@ func create(options createOptions) error {
 		return err
 	}
 	stmt, err := tx.Prepare(`
-insert into jobs(id, name, result, url, started, duration)
-values(?, ?, ?, ?, ?, ?)
-on conflict(id) do update set name=excluded.name, result=excluded.result, url=excluded.url, started=excluded.started, duration=excluded.duration;
+insert or replace into jobs(id, name, result, url, started, duration, prowname, prowjob)
+values(?, ?, ?, ?, ?, ?, ?, ?)
 `)
 	if err != nil {
 		return err
@@ -107,7 +130,11 @@ on conflict(id) do update set name=excluded.name, result=excluded.result, url=ex
 
 	for range options.Jobs {
 		for _, build := range <-buildC {
-			_, err = stmt.Exec(build.ID, build.Job, build.Result, build.URL, build.Started.UTC().Format(time.RFC3339), build.Duration)
+			prowJobJSON, err := json.MarshalIndent(build.ProwJob, "", "  ")
+			if err != nil {
+				log.Printf("error marshalling prowjob json: %v", err)
+			}
+			_, err = stmt.Exec(build.ID, build.Job, build.Result, build.URL, build.Started.UTC().Format(time.RFC3339), build.Duration, build.ProwJob.Name, string(prowJobJSON))
 			if err != nil {
 				log.Printf("error inserting:\nbuild: %#v\nerror: %v\n", build, err)
 			}
@@ -129,7 +156,15 @@ func findBuilds(from time.Duration, baseURL string, storageBaseURL string, job s
 	if err != nil {
 		return nil, err
 	}
-	jobURL.Path = path.Join(jobURL.Path, "job-history/gs/origin-ci-test/logs", job)
+
+	var prefix string
+	switch {
+	case strings.HasPrefix(job, "pull-"):
+		prefix = "job-history/gs/origin-ci-test/pr-logs/directory"
+	case strings.HasPrefix(job, "periodic-"):
+		prefix = "job-history/gs/origin-ci-test/logs"
+	}
+	jobURL.Path = path.Join(jobURL.Path, prefix, job)
 	prowBuilds, err := GetJobHistory(from, jobURL.String())
 	if err != nil {
 		return nil, err

@@ -1,17 +1,17 @@
 package main
 
 import (
+	"github.com/ironcladlou/prowdb/hive"
 	"github.com/spf13/cobra"
-	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 
-	"github.com/ironcladlou/dowser/operator"
-	"github.com/ironcladlou/dowser/prow"
+	"github.com/ironcladlou/prowdb/prow"
 )
 
 func main() {
-	var cmd = &cobra.Command{Use: "dowser"}
-	cmd.AddCommand(operator.NewStartCommand())
-	cmd.AddCommand(prow.NewDBCommand())
+	var cmd = &cobra.Command{Use: "prowdb"}
+
+	cmd.AddCommand(prow.NewCommand())
+	cmd.AddCommand(hive.NewCommand())
 
 	if err := cmd.Execute(); err != nil {
 		panic(err)

@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	v1 "k8s.io/test-infra/prow/apis/prowjobs/v1"
 	pkgio "k8s.io/test-infra/prow/io"
 	"k8s.io/test-infra/prow/io/providers"
 	"k8s.io/test-infra/prow/pod-utils/gcs"
@@ -62,6 +63,7 @@ type buildData struct {
 	Duration     time.Duration
 	Result       string
 	commitHash   string
+	ProwJob      v1.ProwJob
 }
 
 // storageBucket is an abstraction for unit testing
@@ -343,6 +345,14 @@ func getBuildData(ctx context.Context, bucket storageBucket, dir string) (buildD
 		b.Result = "Pending"
 		logrus.Debugf("failed to read finished.json (job might be unfinished): %v", err)
 	}
+	prowJob := v1.ProwJob{}
+	err = readJSON(ctx, bucket, path.Join(dir, "prowjob.json"), &prowJob)
+	if err != nil {
+		logrus.Debugf("failed to read prowjob.json (job might be unfinished): %v", err)
+	} else {
+		b.ProwJob = prowJob
+	}
+
 	// Testgrid metadata.Finished is deprecating the Revision field, however
 	// the actual finished.json is still using revision and maps to DeprecatedRevision.
 	// TODO(ttyang): update both to match when fejta completely removes DeprecatedRevision.

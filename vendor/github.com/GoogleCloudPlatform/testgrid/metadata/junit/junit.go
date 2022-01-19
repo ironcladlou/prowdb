@@ -23,12 +23,40 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"strings"
+	"unicode/utf8"
 )
+
+type suiteOrSuites struct {
+	suites Suites
+}
+
+func (s *suiteOrSuites) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	switch start.Name.Local {
+	case "testsuites":
+		d.DecodeElement(&s.suites, &start)
+	case "testsuite":
+		var suite Suite
+		d.DecodeElement(&suite, &start)
+		s.suites.Suites = append(s.suites.Suites, suite)
+	default:
+		return fmt.Errorf("bad element name: %q", start.Name)
+	}
+	s.suites.Truncate(10000)
+	return nil
+}
 
 // Suites holds a <testsuites/> list of Suite results
 type Suites struct {
 	XMLName xml.Name `xml:"testsuites"`
 	Suites  []Suite  `xml:"testsuite"`
+}
+
+// Truncate ensures that strings do not exceed the specified length.
+func (s *Suites) Truncate(max int) {
+	for i := range s.Suites {
+		s.Suites[i].Truncate(max)
+	}
 }
 
 // Suite holds <testsuite/> results
@@ -43,6 +71,16 @@ type Suite struct {
 	/*
 	* <properties><property name="go.version" value="go1.8.3"/></properties>
 	 */
+}
+
+// Truncate ensures that strings do not exceed the specified length.
+func (s *Suite) Truncate(max int) {
+	for i := range s.Suites {
+		s.Suites[i].Truncate(max)
+	}
+	for i := range s.Results {
+		s.Results[i].Truncate(max)
+	}
 }
 
 // Property defines the xml element that stores additional metrics about each benchmark.
@@ -64,6 +102,7 @@ type Result struct {
 	Failure    *string     `xml:"failure,omitempty"`
 	Output     *string     `xml:"system-out,omitempty"`
 	Error      *string     `xml:"system-err,omitempty"`
+	Errored    *string     `xml:"error,omitempty"`
 	Skipped    *string     `xml:"skipped,omitempty"`
 	Properties *Properties `xml:"properties,omitempty"`
 }
@@ -92,29 +131,56 @@ func (r *Result) SetProperty(name, value string) {
 
 // Message extracts the message for the junit test case.
 //
-// Will use the first non-empty <failure/>, <skipped/>, <system-err/>, <system-out/> value.
-func (jr Result) Message(max int) string {
+// Will use the first non-empty <error/>, <failure/>, <skipped/>, <system-err/>, <system-out/> value.
+func (r Result) Message(max int) string {
 	var msg string
 	switch {
-	case jr.Failure != nil && *jr.Failure != "":
-		msg = *jr.Failure
-	case jr.Skipped != nil && *jr.Skipped != "":
-		msg = *jr.Skipped
-	case jr.Error != nil && *jr.Error != "":
-		msg = *jr.Error
-	case jr.Output != nil && *jr.Output != "":
-		msg = *jr.Output
+	case r.Errored != nil && *r.Errored != "":
+		msg = *r.Errored
+	case r.Failure != nil && *r.Failure != "":
+		msg = *r.Failure
+	case r.Skipped != nil && *r.Skipped != "":
+		msg = *r.Skipped
+	case r.Error != nil && *r.Error != "":
+		msg = *r.Error
+	case r.Output != nil && *r.Output != "":
+		msg = *r.Output
 	}
-	l := len(msg)
-	if max == 0 || l <= max {
+	msg = truncate(msg, max)
+	if utf8.ValidString(msg) {
 		return msg
 	}
-	h := max / 2
-	return msg[:h] + "..." + msg[l-h-1:]
+	return fmt.Sprintf("invalid utf8: %s", strings.ToValidUTF8(msg, "?"))
 }
 
-func unmarshalXML(buf []byte, i interface{}) error {
-	reader := bytes.NewReader(buf)
+func truncate(s string, max int) string {
+	if max <= 0 {
+		return s
+	}
+	l := len(s)
+	if l < max {
+		return s
+	}
+	h := max / 2
+	return s[:h] + "..." + s[l-h:]
+}
+
+func truncatePointer(str *string, max int) {
+	if str == nil {
+		return
+	}
+	s := truncate(*str, max)
+	str = &s
+}
+
+// Truncate ensures that strings do not exceed the specified length.
+func (r Result) Truncate(max int) {
+	for _, s := range []*string{r.Errored, r.Failure, r.Skipped, r.Error, r.Output} {
+		truncatePointer(s, max)
+	}
+}
+
+func unmarshalXML(reader io.Reader, i interface{}) error {
 	dec := xml.NewDecoder(reader)
 	dec.CharsetReader = func(charset string, input io.Reader) (io.Reader, error) {
 		switch charset {
@@ -128,18 +194,22 @@ func unmarshalXML(buf []byte, i interface{}) error {
 	return dec.Decode(i)
 }
 
-func Parse(buf []byte) (Suites, error) {
-	var suites Suites
-	// Try to parse it as a <testsuites/> object
-	err := unmarshalXML(buf, &suites)
-	if err != nil {
-		// Maybe it is a <testsuite/> object instead
-		suites.Suites = append([]Suite(nil), Suite{})
-		ie := unmarshalXML(buf, &suites.Suites[0])
-		if ie != nil {
-			// Nope, it just doesn't parse
-			return suites, fmt.Errorf("not valid testsuites: %v nor testsuite: %v", err, ie)
-		}
+// Parse returns the Suites representation of these XML bytes.
+func Parse(buf []byte) (*Suites, error) {
+	if len(buf) == 0 {
+		return &Suites{}, nil
 	}
-	return suites, nil
+	reader := bytes.NewReader(buf)
+	return ParseStream(reader)
+}
+
+// ParseStream reads bytes into a Suites object.
+func ParseStream(reader io.Reader) (*Suites, error) {
+	// Try to parse it as a <testsuites/> object
+	var s suiteOrSuites
+	err := unmarshalXML(reader, &s)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	return &s.suites, nil
 }
