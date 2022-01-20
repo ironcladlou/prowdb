@@ -81,7 +81,7 @@ func GetJobHistoryByJobURL(ctx context.Context, baseURL string, from time.Durati
 			buildURL.Path = path.Join(buildURL.Path, build.SpyglassLink)
 			builds = append(builds, Build{
 				BuildData: build,
-				Job:       build.ProwJob.Status.PodName,
+				Job:       build.ProwJob.Spec.Job,
 				URL:       buildURL.String(),
 			})
 		}
