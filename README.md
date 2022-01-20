@@ -1,12 +1,20 @@
 # prowdb
 
-A tool to scrape the OpenShift Prow job history and convert the results into a
-SQLite database for easy querying.
+Tools to scrape data from the OpenShift CI prow history.
 
-For example, run this to construct a database from the last 3 weeks of various jobs:
+For example, run this to view job data from the past 24 hours:
 
 ```
-go run . db create \
+go run . prow hist show \
+--from 24h \
+--job pull-ci-openshift-hypershift-main-e2e-aws \
+--job periodic-ci-openshift-hypershift-main-periodics-e2e-aws-periodic
+```
+
+For example, run this to construct a SQLite database from the last 3 weeks of various jobs:
+
+```
+go run . prow db create \
 --from 504h \
 --job release-openshift-ocp-installer-e2e-aws-4.6 \
 --job release-openshift-ocp-installer-e2e-gcp-4.6 \

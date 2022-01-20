@@ -1,19 +1,17 @@
 package main
 
 import (
-	"github.com/ironcladlou/prowdb/hive"
 	"github.com/spf13/cobra"
 
-	"github.com/ironcladlou/prowdb/prow"
+	"github.com/ironcladlou/prowdb/cmd"
 )
 
 func main() {
-	var cmd = &cobra.Command{Use: "prowdb"}
+	var root = &cobra.Command{Use: "prowdb"}
 
-	cmd.AddCommand(prow.NewCommand())
-	cmd.AddCommand(hive.NewCommand())
+	root.AddCommand(cmd.NewCommand())
 
-	if err := cmd.Execute(); err != nil {
+	if err := root.Execute(); err != nil {
 		panic(err)
 	}
 }
