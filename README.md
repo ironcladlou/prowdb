@@ -5,7 +5,7 @@ Tools to scrape data from the OpenShift CI prow history.
 For example, run this to view job data from the past 24 hours:
 
 ```
-go run . prow hist show \
+go run . hist show \
 --from 24h \
 --job pull-ci-openshift-hypershift-main-e2e-aws \
 --job periodic-ci-openshift-hypershift-main-periodics-e2e-aws-periodic
@@ -14,14 +14,10 @@ go run . prow hist show \
 For example, run this to construct a SQLite database from the last 3 weeks of various jobs:
 
 ```
-go run . prow db create \
+go run . db create \
 --from 504h \
---job release-openshift-ocp-installer-e2e-aws-4.6 \
---job release-openshift-ocp-installer-e2e-gcp-4.6 \
---job release-openshift-ocp-installer-e2e-azure-4.6 \
---job release-openshift-origin-installer-e2e-gcp-upgrade-4.6 \
---job release-openshift-origin-installer-e2e-azure-upgrade-4.6 \
---job release-openshift-origin-installer-e2e-aws-upgrade-4.5-stable-to-4.6-ci \
+--job pull-ci-openshift-hypershift-main-e2e-aws \
+--job periodic-ci-openshift-hypershift-main-periodics-e2e-aws-periodic
 --output-file prow-1w.db
 ```
 
